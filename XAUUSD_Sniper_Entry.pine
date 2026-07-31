@@ -1,0 +1,69 @@
+//@version=6
+indicator("XAUUSD Sniper Entry (Dot Only)", overlay=true)
+
+//━━━━━━━━━━━━━━━━━━━
+// INPUTS
+//━━━━━━━━━━━━━━━━━━━
+emaFastLen = input.int(50)
+emaSlowLen = input.int(200)
+swingLen   = input.int(5)
+useNY      = input.bool(true, "NY Session Only")
+
+//━━━━━━━━━━━━━━━━━━━
+// EMAs (for bias only)
+//━━━━━━━━━━━━━━━━━━━
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+
+//━━━━━━━━━━━━━━━━━━━
+// DAILY BIAS
+//━━━━━━━━━━━━━━━━━━━
+dailyClose = request.security(syminfo.tickerid, "D", close)
+bullBias   = close > dailyClose
+bearBias   = close < dailyClose
+
+//━━━━━━━━━━━━━━━━━━━
+// NY SESSION (13:30–22:00 UTC)
+//━━━━━━━━━━━━━━━━━━━
+nyTime    = time(timeframe.period, "1330-2200", "UTC")
+sessionOK = useNY ? not na(nyTime) : true
+
+//━━━━━━━━━━━━━━━━━━━
+// LIQUIDITY SWEEP
+//━━━━━━━━━━━━━━━━━━━
+swingLow  = ta.lowest(low, swingLen)[1]
+swingHigh = ta.highest(high, swingLen)[1]
+
+sellSideSweep = low < swingLow and close > swingLow
+buySideSweep  = high > swingHigh and close < swingHigh
+
+//━━━━━━━━━━━━━━━━━━━
+// ENGULF CONFIRMATION
+//━━━━━━━━━━━━━━━━━━━
+bullishEngulf = close > open and close > open[1]
+bearishEngulf = close < open and close < open[1]
+
+//━━━━━━━━━━━━━━━━━━━
+// FINAL SIGNAL
+//━━━━━━━━━━━━━━━━━━━
+buySignal  = bullBias and sessionOK and sellSideSweep and bullishEngulf
+sellSignal = bearBias and sessionOK and buySideSweep and bearishEngulf
+
+//━━━━━━━━━━━━━━━━━━━
+// EXACT ENTRY DOTS
+//━━━━━━━━━━━━━━━━━━━
+plotshape(
+    buySignal ? close : na,
+    style=shape.circle,
+    location=location.absolute,
+    color=color.blue,
+    size=size.small
+)
+
+plotshape(
+    sellSignal ? close : na,
+    style=shape.circle,
+    location=location.absolute,
+    color=color.red,
+    size=size.small
+)
