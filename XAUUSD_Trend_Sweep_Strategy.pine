@@ -1,0 +1,145 @@
+//@version=6
+strategy(
+     "XAUUSD Trend + Liquidity Sweep Strategy",
+     overlay=true,
+     initial_capital=10000,
+     currency=currency.USD,
+     default_qty_type=strategy.fixed,
+     default_qty_value=1,
+     commission_type=strategy.commission.percent,
+     commission_value=0.02,
+     slippage=2,
+     pyramiding=0)
+
+// Research basis (see chat for sources):
+// - Gold's best-documented systematic edge is trend-following on slow
+//   moving averages (50/200-style), not fast intraday crossovers.
+// - Gold is inversely correlated with the US dollar (DXY) more often
+//   than not, so requiring DXY confirmation adds fundamental confluence.
+// - Risk 1-2% of equity per trade, sized off ATR, is the standard
+//   professional risk-management baseline across futures/CFD trading.
+// This script combines those three pieces with an intraday NY-session
+// liquidity-sweep + engulfing trigger for entry timing. Recommended
+// chart timeframe: 15m-1H on a gold CFD/futures symbol (e.g. OANDA:XAUUSD).
+
+//━━━━━━━━━━━━━━━━━━━
+// INPUTS
+//━━━━━━━━━━━━━━━━━━━
+swingLen        = input.int(5, "Swing Pivot Lookback", group="Entry Trigger")
+useNY           = input.bool(true, "NY Session Only", group="Entry Trigger")
+useDXY          = input.bool(true, "Require DXY Confirmation", group="Trend Filter")
+riskPct         = input.float(1.0, "Risk per Trade (%)", minval=0.1, maxval=5.0, group="Risk Management")
+atrLen          = input.int(14, "ATR Length", group="Risk Management")
+slMult          = input.float(2.0, "Stop Loss (x ATR)", group="Risk Management")
+rr              = input.float(2.0, "Reward:Risk Multiple", group="Risk Management")
+useSeasonFilter = input.bool(false, "Avoid Seasonally Weak Months (Feb/Mar/Jun/Oct)", group="Seasonality")
+startTime       = input.time(timestamp("2018-01-01"), "Backtest Start", group="Backtest Window")
+endTime         = input.time(timestamp("2099-01-01"), "Backtest End", group="Backtest Window")
+
+inDateRange = time >= startTime and time <= endTime
+
+//━━━━━━━━━━━━━━━━━━━
+// HIGHER-TIMEFRAME TREND (Daily EMA50/200 structure)
+//━━━━━━━━━━━━━━━━━━━
+dEmaFast = request.security(syminfo.tickerid, "D", ta.ema(close, 50), lookahead=barmerge.lookahead_off)
+dEmaSlow = request.security(syminfo.tickerid, "D", ta.ema(close, 200), lookahead=barmerge.lookahead_off)
+
+bullBias = close > dEmaFast and dEmaFast > dEmaSlow
+bearBias = close < dEmaFast and dEmaFast < dEmaSlow
+
+//━━━━━━━━━━━━━━━━━━━
+// DXY CONFIRMATION (inverse correlation confluence)
+//━━━━━━━━━━━━━━━━━━━
+dxyEmaFast = request.security("TVC:DXY", "D", ta.ema(close, 50), lookahead=barmerge.lookahead_off)
+dxyEmaSlow = request.security("TVC:DXY", "D", ta.ema(close, 200), lookahead=barmerge.lookahead_off)
+
+dxyDowntrend = dxyEmaFast < dxyEmaSlow
+dxyUptrend   = dxyEmaFast > dxyEmaSlow
+
+dxyLongOK  = useDXY ? dxyDowntrend : true
+dxyShortOK = useDXY ? dxyUptrend   : true
+
+//━━━━━━━━━━━━━━━━━━━
+// SEASONALITY FILTER (optional conviction filter, not a hard requirement)
+//━━━━━━━━━━━━━━━━━━━
+weakMonth = month(time) == 2 or month(time) == 3 or month(time) == 6 or month(time) == 10
+seasonOK  = useSeasonFilter ? not weakMonth : true
+
+//━━━━━━━━━━━━━━━━━━━
+// NY SESSION (09:30-16:00 America/New_York, DST-aware)
+//━━━━━━━━━━━━━━━━━━━
+nyTime    = time(timeframe.period, "0930-1600", "America/New_York")
+sessionOK = useNY ? not na(nyTime) : true
+
+//━━━━━━━━━━━━━━━━━━━
+// LIQUIDITY SWEEP (of last confirmed swing pivot)
+//━━━━━━━━━━━━━━━━━━━
+pivotLow  = ta.pivotlow(swingLen, swingLen)
+pivotHigh = ta.pivothigh(swingLen, swingLen)
+
+var float lastSwingLow  = na
+var float lastSwingHigh = na
+
+if not na(pivotLow)
+    lastSwingLow := pivotLow
+if not na(pivotHigh)
+    lastSwingHigh := pivotHigh
+
+sellSideSweep = not na(lastSwingLow) and low < lastSwingLow and close > lastSwingLow
+buySideSweep  = not na(lastSwingHigh) and high > lastSwingHigh and close < lastSwingHigh
+
+//━━━━━━━━━━━━━━━━━━━
+// ENGULFING CONFIRMATION
+//━━━━━━━━━━━━━━━━━━━
+bullishEngulf = close > open and close[1] < open[1] and open <= close[1] and close >= open[1]
+bearishEngulf = close < open and close[1] > open[1] and open >= close[1] and close <= open[1]
+
+//━━━━━━━━━━━━━━━━━━━
+// FINAL SIGNAL
+//━━━━━━━━━━━━━━━━━━━
+buySignal  = bullBias and dxyLongOK  and seasonOK and sessionOK and sellSideSweep and bullishEngulf and inDateRange
+sellSignal = bearBias and dxyShortOK and seasonOK and sessionOK and buySideSweep  and bearishEngulf and inDateRange
+
+//━━━━━━━━━━━━━━━━━━━
+// RISK-BASED POSITION SIZING + BRACKET EXITS
+//━━━━━━━━━━━━━━━━━━━
+atrVal = ta.atr(atrLen)
+
+var float longStop    = na
+var float longTarget  = na
+var float shortStop   = na
+var float shortTarget = na
+
+if buySignal and strategy.position_size == 0 and not na(atrVal) and atrVal > 0
+    stopDist   = atrVal * slMult
+    riskAmount = strategy.equity * (riskPct / 100)
+    qty        = riskAmount / stopDist
+    longStop   := close - stopDist
+    longTarget := close + stopDist * rr
+    strategy.entry("Long", strategy.long, qty=qty)
+
+if sellSignal and strategy.position_size == 0 and not na(atrVal) and atrVal > 0
+    stopDist    = atrVal * slMult
+    riskAmount  = strategy.equity * (riskPct / 100)
+    qty         = riskAmount / stopDist
+    shortStop   := close + stopDist
+    shortTarget := close - stopDist * rr
+    strategy.entry("Short", strategy.short, qty=qty)
+
+strategy.exit("Long Exit", from_entry="Long", stop=longStop, limit=longTarget)
+strategy.exit("Short Exit", from_entry="Short", stop=shortStop, limit=shortTarget)
+
+//━━━━━━━━━━━━━━━━━━━
+// VISUALS
+//━━━━━━━━━━━━━━━━━━━
+plot(dEmaFast, "Daily EMA50", color=color.new(color.orange, 0), linewidth=2)
+plot(dEmaSlow, "Daily EMA200", color=color.new(color.purple, 0), linewidth=2)
+
+plotshape(buySignal ? close : na, style=shape.triangleup, location=location.belowbar, color=color.blue, size=size.small, title="Buy")
+plotshape(sellSignal ? close : na, style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small, title="Sell")
+
+//━━━━━━━━━━━━━━━━━━━
+// ALERTS
+//━━━━━━━━━━━━━━━━━━━
+alertcondition(buySignal, title="XAUUSD Strategy Buy", message="XAUUSD Strategy: BUY signal")
+alertcondition(sellSignal, title="XAUUSD Strategy Sell", message="XAUUSD Strategy: SELL signal")
