@@ -35,6 +35,8 @@ rr              = input.float(2.0, "Reward:Risk Multiple", group="Risk Managemen
 useSeasonFilter = input.bool(false, "Avoid Seasonally Weak Months (Feb/Mar/Jun/Oct)", group="Seasonality")
 startTime       = input.time(timestamp("2018-01-01"), "Backtest Start", group="Backtest Window")
 endTime         = input.time(timestamp("2099-01-01"), "Backtest End", group="Backtest Window")
+guaranteeDaily  = input.bool(true, "Guarantee At Least One Trade Per Day", group="Trade Frequency")
+fallbackHour    = input.int(15, "Fallback Entry Hour (NY Time, 24h)", minval=0, maxval=23, group="Trade Frequency")
 
 inDateRange = time >= startTime and time <= endTime
 
@@ -101,6 +103,28 @@ buySignal  = bullBias and dxyLongOK  and seasonOK and sessionOK and sellSideSwee
 sellSignal = bearBias and dxyShortOK and seasonOK and sessionOK and buySideSweep  and bearishEngulf and inDateRange
 
 //━━━━━━━━━━━━━━━━━━━
+// TRADE FREQUENCY GUARANTEE
+// Forcing a trade on quiet days trades away edge quality for
+// frequency - it will lower the win rate/profit factor of the
+// forced trades relative to the primary A+ setups above. Only the
+// entry trigger is relaxed (daily bias only); risk sizing and
+// stop/target management stay identical to primary trades.
+//━━━━━━━━━━━━━━━━━━━
+var bool tradedToday = false
+newNYDay = ta.change(dayofmonth(time, "America/New_York")) != 0
+if newNYDay
+    tradedToday := false
+
+nyHour        = hour(time, "America/New_York")
+fallbackWindow = nyHour >= fallbackHour and (useNY ? not na(nyTime) : true)
+
+fallbackLong  = guaranteeDaily and not tradedToday and fallbackWindow and bullBias and inDateRange
+fallbackShort = guaranteeDaily and not tradedToday and fallbackWindow and bearBias and inDateRange
+
+finalBuySignal  = buySignal or fallbackLong
+finalSellSignal = sellSignal or fallbackShort
+
+//━━━━━━━━━━━━━━━━━━━
 // RISK-BASED POSITION SIZING + BRACKET EXITS
 //━━━━━━━━━━━━━━━━━━━
 atrVal = ta.atr(atrLen)
@@ -110,21 +134,27 @@ var float longTarget  = na
 var float shortStop   = na
 var float shortTarget = na
 
-if buySignal and strategy.position_size == 0 and not na(atrVal) and atrVal > 0
+canEnter   = strategy.position_size == 0 and not na(atrVal) and atrVal > 0
+enterLong  = finalBuySignal and canEnter
+enterShort = finalSellSignal and canEnter
+
+if enterLong
     stopDist   = atrVal * slMult
     riskAmount = strategy.equity * (riskPct / 100)
     qty        = riskAmount / stopDist
     longStop   := close - stopDist
     longTarget := close + stopDist * rr
     strategy.entry("Long", strategy.long, qty=qty)
+    tradedToday := true
 
-if sellSignal and strategy.position_size == 0 and not na(atrVal) and atrVal > 0
+if enterShort
     stopDist    = atrVal * slMult
     riskAmount  = strategy.equity * (riskPct / 100)
     qty         = riskAmount / stopDist
     shortStop   := close + stopDist
     shortTarget := close - stopDist * rr
     strategy.entry("Short", strategy.short, qty=qty)
+    tradedToday := true
 
 strategy.exit("Long Exit", from_entry="Long", stop=longStop, limit=longTarget)
 strategy.exit("Short Exit", from_entry="Short", stop=shortStop, limit=shortTarget)
@@ -135,11 +165,13 @@ strategy.exit("Short Exit", from_entry="Short", stop=shortStop, limit=shortTarge
 plot(dEmaFast, "Daily EMA50", color=color.new(color.orange, 0), linewidth=2)
 plot(dEmaSlow, "Daily EMA200", color=color.new(color.purple, 0), linewidth=2)
 
-plotshape(buySignal ? close : na, style=shape.triangleup, location=location.belowbar, color=color.blue, size=size.small, title="Buy")
-plotshape(sellSignal ? close : na, style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small, title="Sell")
+plotshape(enterLong and buySignal ? close : na, style=shape.triangleup, location=location.belowbar, color=color.blue, size=size.small, title="Buy (A+ Setup)")
+plotshape(enterShort and sellSignal ? close : na, style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small, title="Sell (A+ Setup)")
+plotshape(enterLong and not buySignal ? close : na, style=shape.diamond, location=location.belowbar, color=color.aqua, size=size.small, title="Buy (Forced Daily Trade)")
+plotshape(enterShort and not sellSignal ? close : na, style=shape.diamond, location=location.abovebar, color=color.orange, size=size.small, title="Sell (Forced Daily Trade)")
 
 //━━━━━━━━━━━━━━━━━━━
 // ALERTS
 //━━━━━━━━━━━━━━━━━━━
-alertcondition(buySignal, title="XAUUSD Strategy Buy", message="XAUUSD Strategy: BUY signal")
-alertcondition(sellSignal, title="XAUUSD Strategy Sell", message="XAUUSD Strategy: SELL signal")
+alertcondition(finalBuySignal, title="XAUUSD Strategy Buy", message="XAUUSD Strategy: BUY signal")
+alertcondition(finalSellSignal, title="XAUUSD Strategy Sell", message="XAUUSD Strategy: SELL signal")
