@@ -4,44 +4,44 @@ indicator("XAUUSD Sniper Entry (Dot Only)", overlay=true)
 //━━━━━━━━━━━━━━━━━━━
 // INPUTS
 //━━━━━━━━━━━━━━━━━━━
-emaFastLen = input.int(50)
-emaSlowLen = input.int(200)
-swingLen   = input.int(5)
-useNY      = input.bool(true, "NY Session Only")
+swingLen = input.int(5, "Swing Pivot Lookback")
+useNY    = input.bool(true, "NY Session Only")
 
 //━━━━━━━━━━━━━━━━━━━
-// EMAs (for bias only)
+// DAILY BIAS (vs. prior completed day's close)
 //━━━━━━━━━━━━━━━━━━━
-emaFast = ta.ema(close, emaFastLen)
-emaSlow = ta.ema(close, emaSlowLen)
-
-//━━━━━━━━━━━━━━━━━━━
-// DAILY BIAS
-//━━━━━━━━━━━━━━━━━━━
-dailyClose = request.security(syminfo.tickerid, "D", close)
+dailyClose = request.security(syminfo.tickerid, "D", close[1])
 bullBias   = close > dailyClose
 bearBias   = close < dailyClose
 
 //━━━━━━━━━━━━━━━━━━━
-// NY SESSION (13:30–22:00 UTC)
+// NY SESSION (09:30–16:00 America/New_York, DST-aware)
 //━━━━━━━━━━━━━━━━━━━
-nyTime    = time(timeframe.period, "1330-2200", "UTC")
+nyTime    = time(timeframe.period, "0930-1600", "America/New_York")
 sessionOK = useNY ? not na(nyTime) : true
 
 //━━━━━━━━━━━━━━━━━━━
-// LIQUIDITY SWEEP
+// LIQUIDITY SWEEP (of last confirmed swing pivot)
 //━━━━━━━━━━━━━━━━━━━
-swingLow  = ta.lowest(low, swingLen)[1]
-swingHigh = ta.highest(high, swingLen)[1]
+pivotLow  = ta.pivotlow(swingLen, swingLen)
+pivotHigh = ta.pivothigh(swingLen, swingLen)
 
-sellSideSweep = low < swingLow and close > swingLow
-buySideSweep  = high > swingHigh and close < swingHigh
+var float lastSwingLow  = na
+var float lastSwingHigh = na
+
+if not na(pivotLow)
+    lastSwingLow := pivotLow
+if not na(pivotHigh)
+    lastSwingHigh := pivotHigh
+
+sellSideSweep = not na(lastSwingLow) and low < lastSwingLow and close > lastSwingLow
+buySideSweep  = not na(lastSwingHigh) and high > lastSwingHigh and close < lastSwingHigh
 
 //━━━━━━━━━━━━━━━━━━━
-// ENGULF CONFIRMATION
+// ENGULFING CONFIRMATION
 //━━━━━━━━━━━━━━━━━━━
-bullishEngulf = close > open and close > open[1]
-bearishEngulf = close < open and close < open[1]
+bullishEngulf = close > open and close[1] < open[1] and open <= close[1] and close >= open[1]
+bearishEngulf = close < open and close[1] > open[1] and open >= close[1] and close <= open[1]
 
 //━━━━━━━━━━━━━━━━━━━
 // FINAL SIGNAL
