@@ -18,29 +18,38 @@ strategy(
 //   than not, so requiring DXY confirmation adds fundamental confluence.
 // - Risk 1-2% of equity per trade, sized off ATR, is the standard
 //   professional risk-management baseline across futures/CFD trading.
-// This script combines those three pieces with an intraday liquidity-
-// sweep + engulfing trigger for entry timing, gated to the Asian,
-// London, and/or New York sessions (independently toggleable).
-// Recommended chart timeframe: 15m-1H on a gold CFD/futures symbol
-// (e.g. OANDA:XAUUSD).
+// - Trend-following signals are materially less reliable in choppy,
+//   low-volatility, non-trending conditions, hence the ADX and ATR
+//   expansion quality filters below.
+// This script combines those pieces with an intraday liquidity-sweep +
+// engulfing trigger for entry timing, gated to the London and/or New
+// York sessions (Asian session removed - thinnest liquidity, weakest
+// setups). Recommended chart timeframe: 15m-1H on a gold CFD/futures
+// symbol (e.g. OANDA:XAUUSD).
 
 //━━━━━━━━━━━━━━━━━━━
 // INPUTS
 //━━━━━━━━━━━━━━━━━━━
-swingLen        = input.int(5, "Swing Pivot Lookback", group="Entry Trigger")
-useAsia         = input.bool(true, "Trade Asian Session (Tokyo 09:00-18:00)", group="Trading Sessions")
-useLondon       = input.bool(true, "Trade London Session (08:00-17:00)", group="Trading Sessions")
-useNY           = input.bool(true, "Trade New York Session (09:30-16:00)", group="Trading Sessions")
-useDXY          = input.bool(true, "Require DXY Confirmation", group="Trend Filter")
-riskPct         = input.float(1.0, "Risk per Trade (%)", minval=0.1, maxval=5.0, group="Risk Management")
-atrLen          = input.int(14, "ATR Length", group="Risk Management")
-slMult          = input.float(2.0, "Stop Loss (x ATR)", group="Risk Management")
-rr              = input.float(2.0, "Reward:Risk Multiple", group="Risk Management")
-useSeasonFilter = input.bool(false, "Avoid Seasonally Weak Months (Feb/Mar/Jun/Oct)", group="Seasonality")
-startTime       = input.time(timestamp("2018-01-01"), "Backtest Start", group="Backtest Window")
-endTime         = input.time(timestamp("2099-01-01"), "Backtest End", group="Backtest Window")
-guaranteeDaily  = input.bool(true, "Guarantee At Least One Trade Per Day", group="Trade Frequency")
-fallbackHour    = input.int(15, "Fallback Entry Hour (NY Time, 24h)", minval=0, maxval=23, group="Trade Frequency")
+swingLen         = input.int(5, "Swing Pivot Lookback", group="Entry Trigger")
+useLondon        = input.bool(true, "Trade London Session (08:00-17:00)", group="Trading Sessions")
+useNY            = input.bool(true, "Trade New York Session (09:30-16:00)", group="Trading Sessions")
+useDXY           = input.bool(true, "Require DXY Confirmation", group="Trend Filter")
+useADX           = input.bool(true, "Require ADX Trend Strength Filter", group="Quality Filters")
+adxLen           = input.int(14, "ADX Length", group="Quality Filters")
+adxThreshold     = input.float(20, "Minimum ADX", group="Quality Filters")
+useVolFilter     = input.bool(true, "Require Expanding Volatility (ATR > ATR Average)", group="Quality Filters")
+atrSmaLen        = input.int(50, "ATR Average Length", group="Quality Filters")
+riskPct          = input.float(1.0, "Risk per Trade (%)", minval=0.1, maxval=5.0, group="Risk Management")
+atrLen           = input.int(14, "ATR Length", group="Risk Management")
+slMult           = input.float(2.0, "Stop Loss (x ATR)", group="Risk Management")
+rr               = input.float(2.0, "Reward:Risk Multiple", group="Risk Management")
+useBreakeven     = input.bool(true, "Move Stop to Breakeven After 1R Profit", group="Trade Management")
+useSeasonFilter  = input.bool(false, "Avoid Seasonally Weak Months (Feb/Mar/Jun/Oct)", group="Seasonality")
+startTime        = input.time(timestamp("2018-01-01"), "Backtest Start", group="Backtest Window")
+endTime          = input.time(timestamp("2099-01-01"), "Backtest End", group="Backtest Window")
+guaranteeWeekly  = input.bool(true, "Guarantee Minimum Trades Per Week", group="Trade Frequency")
+minTradesPerWeek = input.int(4, "Minimum Trades Per Week", minval=1, maxval=10, group="Trade Frequency")
+fallbackHour     = input.int(15, "Pace-Check Hour (NY Time, 24h)", minval=0, maxval=23, group="Trade Frequency")
 
 inDateRange = time >= startTime and time <= endTime
 
@@ -66,26 +75,32 @@ dxyLongOK  = useDXY ? dxyDowntrend : true
 dxyShortOK = useDXY ? dxyUptrend   : true
 
 //━━━━━━━━━━━━━━━━━━━
+// QUALITY FILTERS (skip choppy, non-trending, low-volatility conditions)
+//━━━━━━━━━━━━━━━━━━━
+atrVal = ta.atr(atrLen)
+volOK  = useVolFilter ? atrVal > ta.sma(atrVal, atrSmaLen) : true
+
+[_, _, adxVal] = ta.dmi(adxLen, adxLen)
+adxOK = useADX ? adxVal >= adxThreshold : true
+
+//━━━━━━━━━━━━━━━━━━━
 // SEASONALITY FILTER (optional conviction filter, not a hard requirement)
 //━━━━━━━━━━━━━━━━━━━
 weakMonth = month(time) == 2 or month(time) == 3 or month(time) == 6 or month(time) == 10
 seasonOK  = useSeasonFilter ? not weakMonth : true
 
 //━━━━━━━━━━━━━━━━━━━
-// TRADING SESSIONS (each window uses its local exchange timezone so
-// it stays correctly aligned across DST changes; Japan has no DST so
-// Tokyo needs none, but London and New York both shift seasonally)
+// TRADING SESSIONS (London and New York; each in its own local
+// exchange timezone so DST shifts don't drift the window)
 //━━━━━━━━━━━━━━━━━━━
-asiaTime   = time(timeframe.period, "0900-1800", "Asia/Tokyo")
 londonTime = time(timeframe.period, "0800-1700", "Europe/London")
 nyTime     = time(timeframe.period, "0930-1600", "America/New_York")
 
-inAsia   = not na(asiaTime)
 inLondon = not na(londonTime)
 inNY     = not na(nyTime)
 
-anySessionEnabled = useAsia or useLondon or useNY
-sessionOK = anySessionEnabled ? ((useAsia and inAsia) or (useLondon and inLondon) or (useNY and inNY)) : true
+anySessionEnabled = useLondon or useNY
+sessionOK = anySessionEnabled ? ((useLondon and inLondon) or (useNY and inNY)) : true
 
 //━━━━━━━━━━━━━━━━━━━
 // LIQUIDITY SWEEP (of last confirmed swing pivot)
@@ -111,29 +126,38 @@ bullishEngulf = close > open and close[1] < open[1] and open <= close[1] and clo
 bearishEngulf = close < open and close[1] > open[1] and open >= close[1] and close <= open[1]
 
 //━━━━━━━━━━━━━━━━━━━
-// FINAL SIGNAL
+// PRIMARY SIGNAL (A+ setup)
 //━━━━━━━━━━━━━━━━━━━
-buySignal  = bullBias and dxyLongOK  and seasonOK and sessionOK and sellSideSweep and bullishEngulf and inDateRange
-sellSignal = bearBias and dxyShortOK and seasonOK and sessionOK and buySideSweep  and bearishEngulf and inDateRange
+buySignal  = bullBias and dxyLongOK  and adxOK and volOK and seasonOK and sessionOK and sellSideSweep and bullishEngulf and inDateRange
+sellSignal = bearBias and dxyShortOK and adxOK and volOK and seasonOK and sessionOK and buySideSweep  and bearishEngulf and inDateRange
 
 //━━━━━━━━━━━━━━━━━━━
-// TRADE FREQUENCY GUARANTEE
-// Forcing a trade on quiet days trades away edge quality for
-// frequency - it will lower the win rate/profit factor of the
-// forced trades relative to the primary A+ setups above. Only the
-// entry trigger is relaxed (daily bias only); risk sizing and
-// stop/target management stay identical to primary trades.
+// WEEKLY TRADE FREQUENCY GUARANTEE
+// Paces toward a minimum trade count per week instead of forcing a
+// trade every single day: checks progress at a fixed hour each
+// weekday and only forces a trade if behind the weekly pace. Forced
+// trades skip the ADX/volatility/DXY quality filters (by design -
+// that's the trade-off for guaranteeing frequency) but keep identical
+// risk sizing and stop/target management to primary trades.
 //━━━━━━━━━━━━━━━━━━━
-var bool tradedToday = false
-newNYDay = ta.change(dayofmonth(time, "America/New_York")) != 0
-if newNYDay
-    tradedToday := false
+dow  = dayofweek(time, "America/New_York")
+pdow = dayofweek(time[1], "America/New_York")
+newWeek = dow == dayofweek.monday and pdow != dayofweek.monday
+
+var int tradesThisWeek = 0
+if newWeek
+    tradesThisWeek := 0
+
+requiredByNow = dow == dayofweek.monday    ? math.ceil(minTradesPerWeek * 1.0 / 4.0) :
+                dow == dayofweek.tuesday   ? math.ceil(minTradesPerWeek * 2.0 / 4.0) :
+                dow == dayofweek.wednesday ? math.ceil(minTradesPerWeek * 3.0 / 4.0) :
+                (dow == dayofweek.thursday or dow == dayofweek.friday) ? minTradesPerWeek : 0
 
 nyHour         = hour(time, "America/New_York")
-fallbackWindow = nyHour >= fallbackHour and sessionOK
+fallbackWindow = nyHour >= fallbackHour and sessionOK and tradesThisWeek < requiredByNow
 
-fallbackLong  = guaranteeDaily and not tradedToday and fallbackWindow and bullBias and inDateRange
-fallbackShort = guaranteeDaily and not tradedToday and fallbackWindow and bearBias and inDateRange
+fallbackLong  = guaranteeWeekly and fallbackWindow and bullBias and inDateRange
+fallbackShort = guaranteeWeekly and fallbackWindow and bearBias and inDateRange
 
 finalBuySignal  = buySignal or fallbackLong
 finalSellSignal = sellSignal or fallbackShort
@@ -141,34 +165,53 @@ finalSellSignal = sellSignal or fallbackShort
 //━━━━━━━━━━━━━━━━━━━
 // RISK-BASED POSITION SIZING + BRACKET EXITS
 //━━━━━━━━━━━━━━━━━━━
-atrVal = ta.atr(atrLen)
+var float longStop       = na
+var float longTarget     = na
+var float longEntryPrice = na
+var float longInitRisk   = na
 
-var float longStop    = na
-var float longTarget  = na
-var float shortStop   = na
-var float shortTarget = na
+var float shortStop       = na
+var float shortTarget     = na
+var float shortEntryPrice = na
+var float shortInitRisk   = na
 
 canEnter   = strategy.position_size == 0 and not na(atrVal) and atrVal > 0
 enterLong  = finalBuySignal and canEnter
 enterShort = finalSellSignal and canEnter
 
 if enterLong
-    stopDist   = atrVal * slMult
-    riskAmount = strategy.equity * (riskPct / 100)
-    qty        = riskAmount / stopDist
-    longStop   := close - stopDist
-    longTarget := close + stopDist * rr
+    stopDist       = atrVal * slMult
+    riskAmount     = strategy.equity * (riskPct / 100)
+    qty            = riskAmount / stopDist
+    longEntryPrice := close
+    longInitRisk   := stopDist
+    longStop       := close - stopDist
+    longTarget     := close + stopDist * rr
     strategy.entry("Long", strategy.long, qty=qty)
-    tradedToday := true
+    tradesThisWeek := tradesThisWeek + 1
 
 if enterShort
-    stopDist    = atrVal * slMult
-    riskAmount  = strategy.equity * (riskPct / 100)
-    qty         = riskAmount / stopDist
-    shortStop   := close + stopDist
-    shortTarget := close - stopDist * rr
+    stopDist        = atrVal * slMult
+    riskAmount      = strategy.equity * (riskPct / 100)
+    qty             = riskAmount / stopDist
+    shortEntryPrice := close
+    shortInitRisk   := stopDist
+    shortStop       := close + stopDist
+    shortTarget     := close - stopDist * rr
     strategy.entry("Short", strategy.short, qty=qty)
-    tradedToday := true
+    tradesThisWeek  := tradesThisWeek + 1
+
+// Breakeven stop management: once a trade reaches 1R in profit, ratchet
+// the stop to entry price so a reversal can no longer turn a winner
+// into a loser. This trades a small amount of "stopped at breakeven"
+// noise for a meaningfully lower average loss.
+if useBreakeven and strategy.position_size > 0 and not na(longEntryPrice) and not na(longInitRisk)
+    if high >= longEntryPrice + longInitRisk
+        longStop := math.max(longStop, longEntryPrice)
+
+if useBreakeven and strategy.position_size < 0 and not na(shortEntryPrice) and not na(shortInitRisk)
+    if low <= shortEntryPrice - shortInitRisk
+        shortStop := math.min(shortStop, shortEntryPrice)
 
 strategy.exit("Long Exit", from_entry="Long", stop=longStop, limit=longTarget)
 strategy.exit("Short Exit", from_entry="Short", stop=shortStop, limit=shortTarget)
@@ -181,8 +224,8 @@ plot(dEmaSlow, "Daily EMA200", color=color.new(color.purple, 0), linewidth=2)
 
 plotshape(enterLong and buySignal ? close : na, style=shape.triangleup, location=location.belowbar, color=color.blue, size=size.small, title="Buy (A+ Setup)")
 plotshape(enterShort and sellSignal ? close : na, style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small, title="Sell (A+ Setup)")
-plotshape(enterLong and not buySignal ? close : na, style=shape.diamond, location=location.belowbar, color=color.aqua, size=size.small, title="Buy (Forced Daily Trade)")
-plotshape(enterShort and not sellSignal ? close : na, style=shape.diamond, location=location.abovebar, color=color.orange, size=size.small, title="Sell (Forced Daily Trade)")
+plotshape(enterLong and not buySignal ? close : na, style=shape.diamond, location=location.belowbar, color=color.aqua, size=size.small, title="Buy (Weekly Quota Trade)")
+plotshape(enterShort and not sellSignal ? close : na, style=shape.diamond, location=location.abovebar, color=color.orange, size=size.small, title="Sell (Weekly Quota Trade)")
 
 //━━━━━━━━━━━━━━━━━━━
 // ALERTS
