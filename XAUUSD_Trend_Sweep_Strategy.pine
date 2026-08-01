@@ -148,10 +148,12 @@ var int tradesThisWeek = 0
 if newWeek
     tradesThisWeek := 0
 
-requiredByNow = dow == dayofweek.monday    ? math.ceil(minTradesPerWeek * 1.0 / 4.0) :
-                dow == dayofweek.tuesday   ? math.ceil(minTradesPerWeek * 2.0 / 4.0) :
-                dow == dayofweek.wednesday ? math.ceil(minTradesPerWeek * 3.0 / 4.0) :
-                (dow == dayofweek.thursday or dow == dayofweek.friday) ? minTradesPerWeek : 0
+requiredByNow = switch
+    dow == dayofweek.monday    => int(math.ceil(minTradesPerWeek * 1.0 / 4.0))
+    dow == dayofweek.tuesday   => int(math.ceil(minTradesPerWeek * 2.0 / 4.0))
+    dow == dayofweek.wednesday => int(math.ceil(minTradesPerWeek * 3.0 / 4.0))
+    dow == dayofweek.thursday or dow == dayofweek.friday => minTradesPerWeek
+    => 0
 
 nyHour         = hour(time, "America/New_York")
 fallbackWindow = nyHour >= fallbackHour and sessionOK and tradesThisWeek < requiredByNow
