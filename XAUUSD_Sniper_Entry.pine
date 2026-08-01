@@ -67,3 +67,9 @@ plotshape(
     color=color.red,
     size=size.small
 )
+
+//━━━━━━━━━━━━━━━━━━━
+// ALERTS
+//━━━━━━━━━━━━━━━━━━━
+alertcondition(buySignal, title="XAUUSD Sniper Buy", message="XAUUSD Sniper Entry: BUY signal")
+alertcondition(sellSignal, title="XAUUSD Sniper Sell", message="XAUUSD Sniper Entry: SELL signal")
