@@ -1,0 +1,248 @@
+//@version=6
+strategy(
+     "XAUUSD Smart Money Concepts (SMC) Strategy",
+     overlay=true,
+     initial_capital=10000,
+     currency=currency.USD,
+     default_qty_type=strategy.fixed,
+     default_qty_value=1,
+     commission_type=strategy.commission.percent,
+     commission_value=0.02,
+     slippage=2,
+     pyramiding=0)
+
+// Smart Money Concepts (SMC/ICT) framework:
+// - Market structure sets directional bias off confirmed swing pivots:
+//   a break of the last opposing swing level while already trending
+//   that way is a BOS (continuation); the same break while trending
+//   the other way is a CHoCH (reversal). A CHoCH can only happen after
+//   price has taken out the opposing swing extreme, which is exactly
+//   the "sweep liquidity, then reverse" behavior SMC calls a
+//   liquidity grab - no separate sweep filter is needed.
+// - Entries are only taken back at institutional footprints: the last
+//   opposing candle before the breakout (order block), or a 3-bar
+//   price imbalance (fair value gap) - and only inside a discount
+//   (for longs) or premium (for shorts) zone of the current swing
+//   range, i.e. buying/selling relative to smart money's own range.
+// - Session filter uses the classic ICT kill zones (London & New York
+//   AM), the windows SMC teaching flags as highest-probability.
+// Recommended chart timeframe: 5m-15m on a gold CFD/futures symbol
+// (e.g. OANDA:XAUUSD) - order blocks and FVGs are timeframe-local, so
+// pick one timeframe and stay on it.
+
+//━━━━━━━━━━━━━━━━━━━
+// INPUTS
+//━━━━━━━━━━━━━━━━━━━
+swingLen           = input.int(5, "Swing Pivot Lookback (Structure)", minval=2, group="Market Structure")
+useDiscountPremium = input.bool(true, "Require Discount/Premium Zone", group="Market Structure")
+obLookback         = input.int(15, "Order Block Search Window (bars)", minval=3, group="Order Blocks")
+useFVG             = input.bool(true, "Allow Fair Value Gap Entries", group="Order Blocks")
+useLondonKZ        = input.bool(true, "Trade London Kill Zone (07:00-10:00)", group="Kill Zones")
+useNYKZ            = input.bool(true, "Trade New York Kill Zone (07:00-10:00)", group="Kill Zones")
+riskPct            = input.float(1.0, "Risk per Trade (%)", minval=0.1, maxval=5.0, group="Risk Management")
+atrLen             = input.int(14, "ATR Length", group="Risk Management")
+atrBufferMult      = input.float(0.25, "Stop Buffer (x ATR beyond zone)", group="Risk Management")
+rr                 = input.float(2.0, "Reward:Risk Multiple", group="Risk Management")
+startTime          = input.time(timestamp("2018-01-01"), "Backtest Start", group="Backtest Window")
+endTime            = input.time(timestamp("2099-01-01"), "Backtest End", group="Backtest Window")
+
+inDateRange = time >= startTime and time <= endTime
+
+//━━━━━━━━━━━━━━━━━━━
+// KILL ZONES (classic ICT windows, DST-aware via local exchange tz)
+//━━━━━━━━━━━━━━━━━━━
+londonKZTime = time(timeframe.period, "0700-1000", "Europe/London")
+nyKZTime     = time(timeframe.period, "0700-1000", "America/New_York")
+
+inLondonKZ = not na(londonKZTime)
+inNYKZ     = not na(nyKZTime)
+
+anyKZEnabled = useLondonKZ or useNYKZ
+sessionOK = anyKZEnabled ? ((useLondonKZ and inLondonKZ) or (useNYKZ and inNYKZ)) : true
+
+//━━━━━━━━━━━━━━━━━━━
+// MARKET STRUCTURE (confirmed swing pivots -> BOS/CHoCH)
+//━━━━━━━━━━━━━━━━━━━
+pivotHighVal = ta.pivothigh(swingLen, swingLen)
+pivotLowVal  = ta.pivotlow(swingLen, swingLen)
+
+var float lastSwingHigh = na
+var float lastSwingLow  = na
+
+if not na(pivotHighVal)
+    lastSwingHigh := pivotHighVal
+if not na(pivotLowVal)
+    lastSwingLow := pivotLowVal
+
+bullBreak = not na(lastSwingHigh) and ta.crossover(close, lastSwingHigh)
+bearBreak = not na(lastSwingLow) and ta.crossunder(close, lastSwingLow)
+
+var int trendState = 0
+bullCHoCH = bullBreak and trendState <= 0
+bearCHoCH = bearBreak and trendState >= 0
+
+//━━━━━━━━━━━━━━━━━━━
+// ORDER BLOCKS (last opposing candle before the structural break)
+//━━━━━━━━━━━━━━━━━━━
+var float bullOBTop    = na
+var float bullOBBottom = na
+var bool  bullOBActive = false
+
+var float bearOBTop    = na
+var float bearOBBottom = na
+var bool  bearOBActive = false
+
+if bullBreak
+    trendState := 1
+    bool obFound = false
+    float foundTop = na
+    float foundBottom = na
+    for i = 1 to obLookback
+        if not obFound and close[i] < open[i]
+            foundTop := high[i]
+            foundBottom := low[i]
+            obFound := true
+    if obFound
+        bullOBTop    := foundTop
+        bullOBBottom := foundBottom
+        bullOBActive := true
+
+if bearBreak
+    trendState := -1
+    bool obFound2 = false
+    float foundTop2 = na
+    float foundBottom2 = na
+    for i = 1 to obLookback
+        if not obFound2 and close[i] > open[i]
+            foundTop2 := high[i]
+            foundBottom2 := low[i]
+            obFound2 := true
+    if obFound2
+        bearOBTop    := foundTop2
+        bearOBBottom := foundBottom2
+        bearOBActive := true
+
+if bullOBActive and close < bullOBBottom
+    bullOBActive := false
+if bearOBActive and close > bearOBTop
+    bearOBActive := false
+
+//━━━━━━━━━━━━━━━━━━━
+// FAIR VALUE GAPS (3-bar imbalance)
+//━━━━━━━━━━━━━━━━━━━
+bullishFVG = low > high[2]
+bearishFVG = high < low[2]
+
+var float bullFVGTop    = na
+var float bullFVGBottom = na
+var bool  bullFVGActive = false
+
+var float bearFVGTop    = na
+var float bearFVGBottom = na
+var bool  bearFVGActive = false
+
+if bullishFVG
+    bullFVGTop    := low
+    bullFVGBottom := high[2]
+    bullFVGActive := true
+
+if bearishFVG
+    bearFVGTop    := low[2]
+    bearFVGBottom := high
+    bearFVGActive := true
+
+if bullFVGActive and close < bullFVGBottom
+    bullFVGActive := false
+if bearFVGActive and close > bearFVGTop
+    bearFVGActive := false
+
+//━━━━━━━━━━━━━━━━━━━
+// PREMIUM / DISCOUNT (relative to current swing range)
+//━━━━━━━━━━━━━━━━━━━
+equilibrium = (lastSwingHigh + lastSwingLow) / 2
+inDiscount  = not na(equilibrium) and close < equilibrium
+inPremium   = not na(equilibrium) and close > equilibrium
+
+discountOK = useDiscountPremium ? inDiscount : true
+premiumOK  = useDiscountPremium ? inPremium  : true
+
+//━━━━━━━━━━━━━━━━━━━
+// ENTRY ZONES (price trading back into an order block or FVG)
+//━━━━━━━━━━━━━━━━━━━
+inBullOBZone  = bullOBActive and low <= bullOBTop and high >= bullOBBottom
+inBullFVGZone = useFVG and bullFVGActive and low <= bullFVGTop and high >= bullFVGBottom
+inBullZone    = inBullOBZone or inBullFVGZone
+
+inBearOBZone  = bearOBActive and high >= bearOBBottom and low <= bearOBTop
+inBearFVGZone = useFVG and bearFVGActive and high >= bearFVGBottom and low <= bearFVGTop
+inBearZone    = inBearOBZone or inBearFVGZone
+
+bullConfirm = close > open
+bearConfirm = close < open
+
+//━━━━━━━━━━━━━━━━━━━
+// FINAL SIGNAL
+//━━━━━━━━━━━━━━━━━━━
+buySignal  = trendState == 1  and inBullZone and bullConfirm and discountOK and sessionOK and inDateRange
+sellSignal = trendState == -1 and inBearZone and bearConfirm and premiumOK  and sessionOK and inDateRange
+
+//━━━━━━━━━━━━━━━━━━━
+// RISK-BASED POSITION SIZING + BRACKET EXITS
+// Stop sits just beyond the order block / FVG zone that triggered the
+// entry (plus a small ATR buffer) since that zone failing means the
+// SMC thesis for the trade is invalidated.
+//━━━━━━━━━━━━━━━━━━━
+atrVal = ta.atr(atrLen)
+
+zoneBottomLong = inBullOBZone ? bullOBBottom : bullFVGBottom
+stopDistLong   = not na(zoneBottomLong) ? (close - zoneBottomLong) + atrVal * atrBufferMult : na
+
+zoneTopShort  = inBearOBZone ? bearOBTop : bearFVGTop
+stopDistShort = not na(zoneTopShort) ? (zoneTopShort - close) + atrVal * atrBufferMult : na
+
+var float longStop    = na
+var float longTarget  = na
+var float shortStop   = na
+var float shortTarget = na
+
+canEnter   = strategy.position_size == 0 and not na(atrVal) and atrVal > 0
+enterLong  = buySignal  and canEnter and not na(stopDistLong)  and stopDistLong  > 0
+enterShort = sellSignal and canEnter and not na(stopDistShort) and stopDistShort > 0
+
+if enterLong
+    riskAmount = strategy.equity * (riskPct / 100)
+    qty        = riskAmount / stopDistLong
+    longStop   := close - stopDistLong
+    longTarget := close + stopDistLong * rr
+    strategy.entry("Long", strategy.long, qty=qty)
+
+if enterShort
+    riskAmount  = strategy.equity * (riskPct / 100)
+    qty         = riskAmount / stopDistShort
+    shortStop   := close + stopDistShort
+    shortTarget := close - stopDistShort * rr
+    strategy.entry("Short", strategy.short, qty=qty)
+
+strategy.exit("Long Exit", from_entry="Long", stop=longStop, limit=longTarget)
+strategy.exit("Short Exit", from_entry="Short", stop=shortStop, limit=shortTarget)
+
+//━━━━━━━━━━━━━━━━━━━
+// VISUALS
+//━━━━━━━━━━━━━━━━━━━
+plot(lastSwingHigh, "Last Swing High", color=color.new(color.red, 40), style=plot.style_circles)
+plot(lastSwingLow,  "Last Swing Low",  color=color.new(color.green, 40), style=plot.style_circles)
+
+bgcolor(bullOBActive ? color.new(color.blue, 85) : na, title="Bullish Order Block")
+bgcolor(bearOBActive ? color.new(color.red, 85) : na, title="Bearish Order Block")
+
+plotshape(bullCHoCH ? low : na, style=shape.labelup, location=location.belowbar, color=color.aqua, text="CHoCH", textcolor=color.white, size=size.tiny, title="Bullish CHoCH")
+plotshape(bearCHoCH ? high : na, style=shape.labeldown, location=location.abovebar, color=color.orange, text="CHoCH", textcolor=color.white, size=size.tiny, title="Bearish CHoCH")
+
+plotshape(enterLong ? close : na, style=shape.triangleup, location=location.belowbar, color=color.blue, size=size.small, title="Buy")
+plotshape(enterShort ? close : na, style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small, title="Sell")
+
+//━━━━━━━━━━━━━━━━━━━
+// ALERTS
+//━━━━━━━━━━━━━━━━━━━
+alertcondition(buySignal, title="XAUUSD SMC Buy", message="XAUUSD SMC Strategy: BUY signal")
+alertcondition(sellSignal, title="XAUUSD SMC Sell", message="XAUUSD SMC Strategy: SELL signal")
