@@ -18,15 +18,19 @@ strategy(
 //   than not, so requiring DXY confirmation adds fundamental confluence.
 // - Risk 1-2% of equity per trade, sized off ATR, is the standard
 //   professional risk-management baseline across futures/CFD trading.
-// This script combines those three pieces with an intraday NY-session
-// liquidity-sweep + engulfing trigger for entry timing. Recommended
-// chart timeframe: 15m-1H on a gold CFD/futures symbol (e.g. OANDA:XAUUSD).
+// This script combines those three pieces with an intraday liquidity-
+// sweep + engulfing trigger for entry timing, gated to the Asian,
+// London, and/or New York sessions (independently toggleable).
+// Recommended chart timeframe: 15m-1H on a gold CFD/futures symbol
+// (e.g. OANDA:XAUUSD).
 
 //━━━━━━━━━━━━━━━━━━━
 // INPUTS
 //━━━━━━━━━━━━━━━━━━━
 swingLen        = input.int(5, "Swing Pivot Lookback", group="Entry Trigger")
-useNY           = input.bool(true, "NY Session Only", group="Entry Trigger")
+useAsia         = input.bool(true, "Trade Asian Session (Tokyo 09:00-18:00)", group="Trading Sessions")
+useLondon       = input.bool(true, "Trade London Session (08:00-17:00)", group="Trading Sessions")
+useNY           = input.bool(true, "Trade New York Session (09:30-16:00)", group="Trading Sessions")
 useDXY          = input.bool(true, "Require DXY Confirmation", group="Trend Filter")
 riskPct         = input.float(1.0, "Risk per Trade (%)", minval=0.1, maxval=5.0, group="Risk Management")
 atrLen          = input.int(14, "ATR Length", group="Risk Management")
@@ -68,10 +72,20 @@ weakMonth = month(time) == 2 or month(time) == 3 or month(time) == 6 or month(ti
 seasonOK  = useSeasonFilter ? not weakMonth : true
 
 //━━━━━━━━━━━━━━━━━━━
-// NY SESSION (09:30-16:00 America/New_York, DST-aware)
+// TRADING SESSIONS (each window uses its local exchange timezone so
+// it stays correctly aligned across DST changes; Japan has no DST so
+// Tokyo needs none, but London and New York both shift seasonally)
 //━━━━━━━━━━━━━━━━━━━
-nyTime    = time(timeframe.period, "0930-1600", "America/New_York")
-sessionOK = useNY ? not na(nyTime) : true
+asiaTime   = time(timeframe.period, "0900-1800", "Asia/Tokyo")
+londonTime = time(timeframe.period, "0800-1700", "Europe/London")
+nyTime     = time(timeframe.period, "0930-1600", "America/New_York")
+
+inAsia   = not na(asiaTime)
+inLondon = not na(londonTime)
+inNY     = not na(nyTime)
+
+anySessionEnabled = useAsia or useLondon or useNY
+sessionOK = anySessionEnabled ? ((useAsia and inAsia) or (useLondon and inLondon) or (useNY and inNY)) : true
 
 //━━━━━━━━━━━━━━━━━━━
 // LIQUIDITY SWEEP (of last confirmed swing pivot)
@@ -115,8 +129,8 @@ newNYDay = ta.change(dayofmonth(time, "America/New_York")) != 0
 if newNYDay
     tradedToday := false
 
-nyHour        = hour(time, "America/New_York")
-fallbackWindow = nyHour >= fallbackHour and (useNY ? not na(nyTime) : true)
+nyHour         = hour(time, "America/New_York")
+fallbackWindow = nyHour >= fallbackHour and sessionOK
 
 fallbackLong  = guaranteeDaily and not tradedToday and fallbackWindow and bullBias and inDateRange
 fallbackShort = guaranteeDaily and not tradedToday and fallbackWindow and bearBias and inDateRange
